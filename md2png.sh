@@ -31,7 +31,7 @@ for img in ${OUTPUT_IMG_PREFIX}-*.png; do
 done
 
 echo "转换完成："
-echo "PDF文件：$OUTPUT_PDF"
-echo "图片名称：$OUTPUT_IMG_PREFIX-*.png"
+echo "PDF文件: $OUTPUT_PDF"
+echo "图片名称: $OUTPUT_IMG_PREFIX-*.png"
 
 mv *.png /mnt/c/Users/arthurzcz/Downloads
