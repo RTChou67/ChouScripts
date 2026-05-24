@@ -391,15 +391,7 @@ def show_single_file_detail(filename):
         print(f"状态: {Colors.YELLOW}RUNNING...{Colors.ENDC}")
     elif status == "NORMAL":
         print(f"状态: {Colors.GREEN}COMPLETE{Colors.ENDC}")
-        if opt_data:
-            last_step = opt_data[-1]
-            is_converged = all(Colors.GREEN in item for item in last_step[1:])
-            if is_converged:
-                print("      (结构已收敛)")
-            else:
-                print(
-                    f"      ({Colors.YELLOW}警告: 正常结束但未完全收敛 - 请检查是否达到最大步数{Colors.ENDC})"
-                )
+        print("      (任务已正常结束)")
 
 
 def show_batch_summary(file_list):
@@ -418,7 +410,7 @@ def show_batch_summary(file_list):
     print(f"--- 正在检查 {len(valid_files)} 个文件 ---")
 
     table_rows = []
-    converged_count = 0
+    complete_count = 0
 
     headers = [
         "File",
@@ -453,6 +445,7 @@ def show_batch_summary(file_list):
             status_str = f"{Colors.GREEN}DONE{Colors.ENDC}"
             fname_colored = f"{Colors.GREEN}{filename}{Colors.ENDC}"
             vals = ["N/A"] * 4
+            complete_count += 1
 
         # 获取最后一步数据
         if opt_data:
@@ -460,55 +453,57 @@ def show_batch_summary(file_list):
             step_str = str(last[0])
             vals = last[1:]
 
-            if status == "NORMAL":
-                if all(Colors.GREEN in v for v in vals):
-                    converged_count += 1
-                else:
-                    # 正常结束但未收敛 (通常是MaxCycle)
-                    status_str = f"{Colors.YELLOW}DONE*{Colors.ENDC}"
-
         row = [fname_colored, type_str, step_str] + vals + [status_str]
         table_rows.append(row)
 
     draw_table(headers, table_rows)
     print(
-        f"\n统计: {Colors.GREEN}{converged_count}{Colors.ENDC} 个文件已收敛 / 共 {len(valid_files)} 个有效文件。"
+        f"\n统计: {Colors.GREEN}{complete_count}{Colors.ENDC} 个文件已完成 / 共 {len(valid_files)} 个有效文件。"
     )
 
 
 # --- 主程序入口 ---
 
 
+def collect_output_files(args):
+    if not args:
+        return sorted(set(glob.glob("*.log") + glob.glob("*.out")))
+
+    files = []
+    for arg in args:
+        if os.path.isdir(arg):
+            files.extend(glob.glob(os.path.join(arg, "*.log")))
+            files.extend(glob.glob(os.path.join(arg, "*.out")))
+        elif "*" in arg or "?" in arg or "[" in arg:
+            files.extend(glob.glob(arg))
+        else:
+            files.append(arg)
+
+    return sorted(dict.fromkeys(files))
+
+
 def main():
     args = sys.argv[1:]
 
-    if len(args) == 0:
-        # 默认扫描常见后缀
-        files = glob.glob("*.log") + glob.glob("*.out")
-        if not files:
-            print("当前目录无 .log 或 .out 文件。")
-            sys.exit(0)
-        show_batch_summary(files)
-
-    elif len(args) == 1:
-        filename = args[0]
-        # 支持通配符
-        if "*" in filename or "?" in filename:
-            files = glob.glob(filename)
-            if len(files) == 1:
-                show_single_file_detail(files[0])
-            elif len(files) > 1:
-                show_batch_summary(files)
-            else:
-                print("未找到匹配的文件。")
+    if len(args) == 1 and not os.path.isdir(args[0]) and not ("*" in args[0] or "?" in args[0] or "[" in args[0]):
+        if os.path.exists(args[0]):
+            show_single_file_detail(args[0])
         else:
-            if os.path.exists(filename):
-                show_single_file_detail(filename)
-            else:
-                print(f"错误：文件 {filename} 不存在。")
+            print(f"错误：文件 {args[0]} 不存在。")
+        return
 
+    files = collect_output_files(args)
+    if not files:
+        if len(args) == 0:
+            print("当前目录无 .log 或 .out 文件。")
+        else:
+            print("指定路径无 .log 或 .out 文件。")
+        sys.exit(0)
+
+    if len(files) == 1 and len(args) == 1 and not os.path.isdir(args[0]):
+        show_single_file_detail(files[0])
     else:
-        show_batch_summary(args)
+        show_batch_summary(files)
 
 
 if __name__ == "__main__":
