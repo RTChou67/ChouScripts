@@ -102,48 +102,126 @@ def check_termination_status(filename, file_type):
     return "RUNNING"
 
 
-def parse_gaussian_steps(filename):
+def update_last_or_append(rows, row, keep_all):
+    if keep_all:
+        rows.append(row)
+    elif rows:
+        rows[0] = row
+    else:
+        rows.append(row)
+
+
+def parse_gaussian_block(lines, step):
+    parts = [
+        lines[0].split(),  # Max Force
+        lines[1].split(),  # RMS Force
+        lines[2].split(),  # Max Disp
+        lines[3].split(),  # RMS Disp
+    ]
+
+    data_cells = []
+    for p in parts:
+        value = p[2]
+        status = p[4]
+        if status == "YES":
+            fmt_value = f"{Colors.GREEN}{value}{Colors.ENDC}"
+        else:
+            fmt_value = f"{Colors.RED}{value}{Colors.ENDC}"
+        data_cells.append(fmt_value)
+    return [step] + data_cells
+
+
+def parse_gaussian_last_step_from_tail(filename, initial_size=262144):
+    try:
+        with open(filename, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            file_size = f.tell()
+            size = min(initial_size, file_size)
+            while size <= file_size:
+                f.seek(file_size - size, os.SEEK_SET)
+                content = f.read(size).decode("utf-8", errors="ignore")
+
+                candidates = []
+                for match in re.finditer(r"^\s*Maximum Force", content, flags=re.M):
+                    force_pos = match.start()
+                    block = content[force_pos:].splitlines()[:4]
+                    if (
+                        len(block) == 4
+                        and block[0].strip().startswith("Maximum Force")
+                        and block[1].strip().startswith("RMS")
+                        and "Force" in block[1]
+                    ):
+                        prior = content[:force_pos]
+                        step_matches = list(
+                            re.finditer(
+                                r"Step number\s+(\d+)\s+out of a maximum of\s+(\d+)",
+                                prior,
+                            )
+                        )
+                        if step_matches:
+                            step = int(step_matches[-1].group(1))
+                            max_steps = int(step_matches[-1].group(2))
+                        else:
+                            step = content[:force_pos].count("Maximum Force") + 1
+                            max_steps = None
+                        candidates.append((max_steps, force_pos, parse_gaussian_block(block, step)))
+
+                preferred = [
+                    row
+                    for max_steps, _, row in candidates
+                    if max_steps is None or max_steps > 2
+                ]
+                if preferred:
+                    return [preferred[-1]]
+                if candidates and size == file_size:
+                    return [candidates[-1][2]]
+
+                if size == file_size:
+                    break
+                size = min(size * 2, file_size)
+    except Exception:
+        return []
+    return []
+
+
+def parse_gaussian_steps(filename, keep_all=True):
     """解析 Gaussian 优化步骤"""
+    if not keep_all:
+        tail_result = parse_gaussian_last_step_from_tail(filename)
+        if tail_result:
+            return tail_result
+
     results = []
     try:
         with open(filename, "r", errors="ignore") as f:
-            lines = f.readlines()
-    except Exception:
-        return []
+            window = []
+            step_counter = 0
+            for line in f:
+                window.append(line)
+                if len(window) < 4:
+                    continue
+                if len(window) > 4:
+                    window.pop(0)
 
-    step_counter = 0
-    for i in range(len(lines) - 4):
-        l1 = lines[i].strip()
-        if l1.startswith("Maximum Force") and ("YES" in l1 or "NO" in l1):
-            try:
-                l2 = lines[i + 1].strip()
-                l3 = lines[i + 2].strip()
-                l4 = lines[i + 3].strip()
-
-                if not (l2.startswith("RMS") and "Force" in l2):
+                l1 = window[0].strip()
+                if not (l1.startswith("Maximum Force") and ("YES" in l1 or "NO" in l1)):
                     continue
 
-                step_counter += 1
-                parts = [
-                    lines[i].split(),  # Max Force
-                    lines[i + 1].split(),  # RMS Force
-                    lines[i + 2].split(),  # Max Disp
-                    lines[i + 3].split(),  # RMS Disp
-                ]
+                try:
+                    l2 = window[1].strip()
+                    if not (l2.startswith("RMS") and "Force" in l2):
+                        continue
 
-                data_cells = []
-                for p in parts:
-                    value = p[2]
-                    status = p[4]
-                    if status == "YES":
-                        fmt_value = f"{Colors.GREEN}{value}{Colors.ENDC}"
-                    else:
-                        fmt_value = f"{Colors.RED}{value}{Colors.ENDC}"
-                    data_cells.append(fmt_value)
-
-                results.append([step_counter] + data_cells)
-            except (IndexError, ValueError):
-                continue
+                    step_counter += 1
+                    update_last_or_append(
+                        results,
+                        parse_gaussian_block(window, step_counter),
+                        keep_all,
+                    )
+                except (IndexError, ValueError):
+                    continue
+    except Exception:
+        return []
     return results
 
 
@@ -301,9 +379,9 @@ def parse_orca_steps(filename):
     return results
 
 
-def parse_opt_steps(filename, file_type):
+def parse_opt_steps(filename, file_type, keep_all=True):
     if file_type == "GAUSSIAN":
-        return parse_gaussian_steps(filename)
+        return parse_gaussian_steps(filename, keep_all=keep_all)
     elif file_type == "CP2K":
         return parse_cp2k_steps(filename)
     elif file_type == "ORCA":
@@ -424,7 +502,7 @@ def show_batch_summary(file_list):
     ]
 
     for filename, ftype in valid_files:
-        opt_data = parse_opt_steps(filename, ftype)
+        opt_data = parse_opt_steps(filename, ftype, keep_all=False)
         status = check_termination_status(filename, ftype)
 
         step_str = "N/A"

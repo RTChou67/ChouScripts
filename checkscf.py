@@ -14,6 +14,22 @@ class Colors:
     ENDC = "\033[0m"
 
 
+THRESHOLD_PATTERNS = {
+    "rmsdp": re.compile(r"RMS density matrix=([\d.Dd\-+]+)"),
+    "maxdp": re.compile(r"MAX density matrix=([\d.Dd\-+]+)"),
+    "de": re.compile(r"energy=([\d.Dd\-+]+)"),
+}
+CYCLE_PATTERN = re.compile(r"^\s*Cycle\s+(\d+)\s+Pass")
+ENERGY_PATTERN = re.compile(r"E=\s*([-+]?\d*\.?\d+(?:[DdEe][-+]?\d+)?)")
+RMSDP_PATTERN = re.compile(r"RMSDP=\s*([\d.Dd\-+]+)")
+MAXDP_PATTERN = re.compile(r"MaxDP=\s*([\d.Dd\-+]+)")
+DELTA_E_PATTERN = re.compile(r"DE=\s*([\d.Dd\-+]+)")
+SCF_DONE_PATTERN = re.compile(
+    r"SCF Done:\s+E\([^)]+\)\s+=\s+([-+]?\d*\.?\d+(?:[DdEe][-+]?\d+)?)\s+"
+    r"A\.U\.\s+after\s+(\d+)\s+cycles?"
+)
+
+
 def get_visible_len(s):
     return len(re.sub(r"\033\[[0-9;]*m", "", str(s)))
 
@@ -153,89 +169,114 @@ def get_thresholds(content):
     }
 
 
-def parse_detailed_scf_steps(content, thresholds):
-    rows = []
-    lines = content.splitlines()
-    cycle_pattern = re.compile(r"^\s*Cycle\s+(\d+)\s+Pass")
-
-    for idx, line in enumerate(lines):
-        cycle_match = cycle_pattern.search(line)
-        if not cycle_match:
-            continue
-
-        try:
-            cycle = int(cycle_match.group(1))
-        except ValueError:
-            continue
-
-        energy = None
-        rmsdp = None
-        maxdp = None
-        delta_e = None
-
-        for lookahead in lines[idx + 1 : min(idx + 15, len(lines))]:
-            stripped = lookahead.strip()
-
-            if energy is None and stripped.startswith("E="):
-                energy_match = re.search(r"E=\s*([-+]?\d*\.?\d+(?:[DdEe][-+]?\d+)?)", stripped)
-                if energy_match:
-                    energy = convert_d_to_float(energy_match.group(1))
-
-            if rmsdp is None and stripped.startswith("RMSDP="):
-                rmsdp_match = re.search(r"RMSDP=\s*([\d.Dd\-+]+)", stripped)
-                maxdp_match = re.search(r"MaxDP=\s*([\d.Dd\-+]+)", stripped)
-                delta_e_match = re.search(r"DE=\s*([\d.Dd\-+]+)", stripped)
-                if rmsdp_match and maxdp_match:
-                    rmsdp = convert_d_to_float(rmsdp_match.group(1))
-                    maxdp = convert_d_to_float(maxdp_match.group(1))
-                    delta_e = convert_d_to_float(delta_e_match.group(1)) if delta_e_match else None
-                    break
-
-        if energy is None or rmsdp is None or maxdp is None:
-            continue
-
-        rows.append(
-            [
-                cycle,
-                color_by_threshold(delta_e, thresholds["de"]),
-                color_by_threshold(rmsdp, thresholds["rmsdp"]),
-                color_by_threshold(maxdp, thresholds["maxdp"]),
-                energy,
-            ]
-        )
-
-    return rows
+def update_last_or_append(rows, row, keep_all):
+    if keep_all:
+        rows.append(row)
+    elif rows:
+        rows[0] = row
+    else:
+        rows.append(row)
 
 
-def parse_scf_done_steps(content):
-    pattern = re.compile(
-        r"SCF Done:\s+E\([^)]+\)\s+=\s+([-+]?\d*\.?\d+(?:[DdEe][-+]?\d+)?)\s+"
-        r"A\.U\.\s+after\s+(\d+)\s+cycles?"
-    )
-
-    rows = []
-    for match in pattern.finditer(content):
-        energy = convert_d_to_float(match.group(1))
-        cycle = int(match.group(2))
-        if energy is not None:
-            rows.append([cycle, "N/A", "N/A", "N/A", energy])
-    return rows
+def format_detailed_rows(raw_rows, thresholds):
+    return [
+        [
+            cycle,
+            color_by_threshold(delta_e, thresholds["de"]),
+            color_by_threshold(rmsdp, thresholds["rmsdp"]),
+            color_by_threshold(maxdp, thresholds["maxdp"]),
+            energy,
+        ]
+        for cycle, delta_e, rmsdp, maxdp, energy in raw_rows
+    ]
 
 
-def parse_scf_steps(filename):
+def parse_scf_steps(filename, keep_all=True):
+    thresholds = {"rmsdp": 1.0e-8, "maxdp": 1.0e-6, "de": 1.0e-6}
+    detailed_rows = []
+    fallback_rows = []
+    pending = None
+    pending_remaining = 0
+
     try:
         with open(filename, "r", errors="ignore") as handle:
-            content = handle.read()
+            for line in handle:
+                for key, pattern in THRESHOLD_PATTERNS.items():
+                    match = pattern.search(line)
+                    if match:
+                        value = convert_d_to_float(match.group(1))
+                        if value is not None:
+                            thresholds[key] = value
+
+                done_match = SCF_DONE_PATTERN.search(line)
+                if done_match:
+                    energy = convert_d_to_float(done_match.group(1))
+                    if energy is not None:
+                        update_last_or_append(
+                            fallback_rows,
+                            [int(done_match.group(2)), "N/A", "N/A", "N/A", energy],
+                            keep_all,
+                        )
+
+                if pending is not None:
+                    stripped = line.strip()
+                    if pending["energy"] is None and stripped.startswith("E="):
+                        energy_match = ENERGY_PATTERN.search(stripped)
+                        if energy_match:
+                            pending["energy"] = convert_d_to_float(energy_match.group(1))
+
+                    if pending["rmsdp"] is None and stripped.startswith("RMSDP="):
+                        rmsdp_match = RMSDP_PATTERN.search(stripped)
+                        maxdp_match = MAXDP_PATTERN.search(stripped)
+                        delta_e_match = DELTA_E_PATTERN.search(stripped)
+                        if rmsdp_match and maxdp_match:
+                            pending["rmsdp"] = convert_d_to_float(rmsdp_match.group(1))
+                            pending["maxdp"] = convert_d_to_float(maxdp_match.group(1))
+                            pending["delta_e"] = (
+                                convert_d_to_float(delta_e_match.group(1))
+                                if delta_e_match
+                                else None
+                            )
+
+                    if (
+                        pending["energy"] is not None
+                        and pending["rmsdp"] is not None
+                        and pending["maxdp"] is not None
+                    ):
+                        update_last_or_append(
+                            detailed_rows,
+                            [
+                                pending["cycle"],
+                                pending["delta_e"],
+                                pending["rmsdp"],
+                                pending["maxdp"],
+                                pending["energy"],
+                            ],
+                            keep_all,
+                        )
+                        pending = None
+                    else:
+                        pending_remaining -= 1
+                        if pending_remaining <= 0:
+                            pending = None
+
+                cycle_match = CYCLE_PATTERN.search(line)
+                if cycle_match:
+                    pending = {
+                        "cycle": int(cycle_match.group(1)),
+                        "energy": None,
+                        "rmsdp": None,
+                        "maxdp": None,
+                        "delta_e": None,
+                    }
+                    pending_remaining = 15
     except OSError:
-        return [], None, "READ_ERROR"
+        return [], None
 
-    thresholds = get_thresholds(content)
-    detailed = parse_detailed_scf_steps(content, thresholds)
-    if detailed:
-        return detailed, thresholds
+    if detailed_rows:
+        return format_detailed_rows(detailed_rows, thresholds), thresholds
 
-    fallback = parse_scf_done_steps(content)
-    return fallback, thresholds
+    return fallback_rows, thresholds
 
 
 def is_detailed_scf_converged(last_step):
@@ -329,7 +370,7 @@ def show_batch_summary(file_list):
 
     for filename in valid_files:
         status = check_termination_status(filename)
-        scf_data, _ = parse_scf_steps(filename)
+        scf_data, _ = parse_scf_steps(filename, keep_all=False)
         if status == "NORMAL":
             complete_count += 1
 
